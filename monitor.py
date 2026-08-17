@@ -317,18 +317,56 @@ async def check_pair(page, arrival, departure):
 
 async def send_telegram(message):
 
-    token = os.environ.get(
-        "TELEGRAM_BOT_TOKEN"
-    )
-
-    chat_id = os.environ.get(
-        "TELEGRAM_CHAT_ID"
-    )
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
     if not token or not chat_id:
-        print(
-            "Telegram credentials not configured."
-        )
+        print("Telegram credentials are missing.")
+        return False
+
+    import urllib.request
+    import urllib.parse
+    import urllib.error
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    data = urllib.parse.urlencode({
+        "chat_id": chat_id.strip(),
+        "text": message
+    }).encode("utf-8")
+
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=20
+        ) as response:
+
+            result = response.read().decode("utf-8")
+
+            print("Telegram API response:")
+            print(result)
+
+            return True
+
+    except urllib.error.HTTPError as error:
+
+        response = error.read().decode("utf-8")
+
+        print("TELEGRAM ERROR:")
+        print(response)
+
+        return False
+
+    except Exception as error:
+
+        print(f"Telegram connection error: {error}")
+
         return False
 
     import urllib.request
