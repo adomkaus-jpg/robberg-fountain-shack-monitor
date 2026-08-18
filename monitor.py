@@ -2,7 +2,8 @@ import asyncio
 import json
 import os
 import re
-import sys
+import urllib.request
+import urllib.parse
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -14,14 +15,15 @@ START = date(2026, 12, 5)
 END = date(2026, 12, 15)
 
 STATE_FILE = Path("state.json")
-TIMEOUT = 45_000
+TIMEOUT = 45000
 
 
 def date_pairs():
-    d = START
-    while d < END:
-        yield d, d + timedelta(days=1)
-        d += timedelta(days=1)
+    current = START
+
+    while current < END:
+        yield current, current + timedelta(days=1)
+        current += timedelta(days=1)
 
 
 def load_state():
@@ -43,14 +45,13 @@ def save_state(state):
     )
 
 
-async def choose_flatpickr_date(page, input_locator, target_date):
-    """
-    Click a CapeNature Flatpickr date field and select target_date.
-    """
+async def choose_date(page, input_selector, target_date):
 
-    await input_locator.click()
+    await page.locator(input_selector).click()
 
-    calendar = page.locator(".flatpickr-calendar").filter(
+    calendar = page.locator(
+        ".flatpickr-calendar"
+    ).filter(
         has=page.locator(".flatpickr-month")
     ).last
 
@@ -59,139 +60,86 @@ async def choose_flatpickr_date(page, input_locator, target_date):
         timeout=10000
     )
 
-    # Move calendar to the required month.
-    for _ in range(24):
+    month_dropdown = calendar.locator(
+        ".flatpickr-monthDropdown-months"
+    )
 
-        month_text = await calendar.locator(
-            ".flatpickr-current-month"
-        ).inner_text()
+    year_input = calendar.locator(
+        ".cur-year"
+    )
 
-        month_match = re.search(
-            r"([A-Za-z]+)\s+(\d{4})",
-            month_text
+    if await month_dropdown.count():
+
+        await month_dropdown.select_option(
+            str(target_date.month - 1)
         )
 
-        if not month_match:
-            raise RuntimeError(
-                f"Could not determine calendar month: {month_text}"
+        await year_input.fill(
+            str(target_date.year)
+        )
+
+        await year_input.press("Enter")
+
+        await page.wait_for_timeout(300)
+
+    else:
+
+        for _ in range(24):
+
+            month_text = await calendar.locator(
+                ".flatpickr-current-month"
+            ).inner_text()
+
+            match = re.search(
+                r"([A-Za-z]+)\s+(\d{4})",
+                month_text
             )
 
-        current_month = month_match.group(1)
-        current_year = int(month_match.group(2))
-
-        current = date(
-            current_year,
-            date(
-                target_date.year,
-                target_date.month,
-                1
-            ).month,
-            1
-        )
-
-        # Instead of relying on month arithmetic from the text,
-        # inspect the visible year/month controls.
-        month_select = calendar.locator(
-            ".flatpickr-monthDropdown-months"
-        )
-
-        if await month_select.count():
-            selected_month = await month_select.input_value()
-            current_year_value = await calendar.locator(
-                ".cur-year"
-            ).input_value()
-
-            if (
-                int(current_year_value) == target_date.year
-                and int(selected_month) == target_date.month - 1
-            ):
+            if not match:
                 break
 
-            await month_select.select_option(
-                str(target_date.month - 1)
+            month_name = match.group(1)
+            year = int(match.group(2))
+
+            from datetime import datetime
+
+            month = datetime.strptime(
+                month_name,
+                "%B"
+            ).month
+
+            difference = (
+                target_date.year * 12
+                + target_date.month
+                - year * 12
+                - month
             )
 
-            year_input = calendar.locator(".cur-year")
-            await year_input.fill(str(target_date.year))
-            await year_input.press("Enter")
+            if difference == 0:
+                break
 
-            await page.wait_for_timeout(200)
-
-            break
-
-        # Fallback for calendars without month dropdown.
-        current_month_num = date(
-            target_date.year,
-            1,
-            1
-        ).month
-
-        # Use the calendar's next/previous controls.
-        displayed = await calendar.locator(
-            ".flatpickr-current-month"
-        ).inner_text()
-
-        displayed_match = re.search(
-            r"([A-Za-z]+)\s+(\d{4})",
-            displayed
-        )
-
-        if not displayed_match:
-            raise RuntimeError("Unable to read calendar date")
-
-        displayed_month = displayed_match.group(1)
-        displayed_year = int(displayed_match.group(2))
-
-        from datetime import datetime
-
-        displayed_month_num = datetime.strptime(
-            displayed_month,
-            "%B"
-        ).month
-
-        diff = (
-            target_date.year * 12
-            + target_date.month
-            - displayed_year * 12
-            - displayed_month_num
-        )
-
-        if diff > 0:
-            for _ in range(diff):
+            if difference > 0:
                 await calendar.locator(
                     ".flatpickr-next-month"
                 ).click()
-                await page.wait_for_timeout(50)
-
-        elif diff < 0:
-            for _ in range(abs(diff)):
+            else:
                 await calendar.locator(
                     ".flatpickr-prev-month"
                 ).click()
-                await page.wait_for_timeout(50)
 
-        break
+            await page.wait_for_timeout(100)
 
-    # Select the correct day.
-    day = calendar.locator(
+    days = calendar.locator(
         ".flatpickr-day"
-    ).filter(
-        has_text=str(target_date.day)
     )
 
-    count = await day.count()
+    for i in range(await days.count()):
 
-    if count == 0:
-        raise RuntimeError(
-            f"Could not find day {target_date.day} "
-            f"for {target_date}"
-        )
+        day = days.nth(i)
 
-    # Flatpickr can contain days from adjacent months.
-    for i in range(count):
-        candidate = day.nth(i)
-
-        classes = await candidate.get_attribute("class") or ""
+        classes = await day.get_attribute(
+            "class"
+        ) or ""
 
         if "prevMonthDay" in classes:
             continue
@@ -199,14 +147,20 @@ async def choose_flatpickr_date(page, input_locator, target_date):
         if "nextMonthDay" in classes:
             continue
 
-        if "disabled" in classes:
-            raise RuntimeError(
-                f"Date {target_date} is disabled"
-            )
+        text = (await day.inner_text()).strip()
 
-        await candidate.click()
-        await page.wait_for_timeout(250)
-        return
+        if text == str(target_date.day):
+
+            if "disabled" in classes:
+                raise RuntimeError(
+                    f"{target_date} is disabled"
+                )
+
+            await day.click()
+
+            await page.wait_for_timeout(250)
+
+            return
 
     raise RuntimeError(
         f"Could not select {target_date}"
@@ -223,49 +177,27 @@ async def check_pair(page, arrival, departure):
 
     await page.wait_for_timeout(1000)
 
-    # The first Arrival/Departure pair belongs to accommodation.
-    arrival_input = page.locator(
-        "#startDate_0"
-    )
-
-    departure_input = page.locator(
-        "#endDate_0"
-    )
-
-    if await arrival_input.count() == 0:
-        raise RuntimeError(
-            "Could not find accommodation arrival field"
-        )
-
-    if await departure_input.count() == 0:
-        raise RuntimeError(
-            "Could not find accommodation departure field"
-        )
-
-    # Select arrival date.
-    await choose_flatpickr_date(
+    await choose_date(
         page,
-        arrival_input,
+        "#startDate_0",
         arrival
     )
 
-    # Select departure date.
-    await choose_flatpickr_date(
+    await choose_date(
         page,
-        departure_input,
+        "#endDate_0",
         departure
     )
 
-    # Click the first Search button.
-    search_button = page.get_by_role(
+    search = page.get_by_role(
         "button",
         name=re.compile(
             r"search",
-            re.IGNORECASE
+            re.I
         )
     ).first
 
-    await search_button.click()
+    await search.click()
 
     await page.wait_for_timeout(2000)
 
@@ -275,17 +207,18 @@ async def check_pair(page, arrival, departure):
 
     lower = text.lower()
 
-    # We only care about Fountain Shack.
     if "fountain shack" not in lower:
-        return False, text
+        return False
 
-    start = lower.find("fountain shack")
+    start = lower.find(
+        "fountain shack"
+    )
 
     section = lower[
         start:start + 3000
     ]
 
-    unavailable_phrases = [
+    unavailable = [
         "no available units",
         "no availability",
         "fully booked",
@@ -295,11 +228,11 @@ async def check_pair(page, arrival, departure):
 
     if any(
         phrase in section
-        for phrase in unavailable_phrases
+        for phrase in unavailable
     ):
-        return False, section
+        return False
 
-    positive_phrases = [
+    positive = [
         "book now",
         "available",
         "add to basket",
@@ -307,86 +240,63 @@ async def check_pair(page, arrival, departure):
         "units available"
     ]
 
-    available = any(
+    return any(
         phrase in section
-        for phrase in positive_phrases
+        for phrase in positive
     )
 
-    return available, section
 
+def create_github_issue(available):
 
-async def send_telegram(message):
-
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-
-    if not token or not chat_id:
-        print("Telegram credentials are missing.")
-        return False
-
-    import urllib.request
-    import urllib.parse
-    import urllib.error
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-
-    data = urllib.parse.urlencode({
-        "chat_id": chat_id.strip(),
-        "text": message
-    }).encode("utf-8")
-
-    request = urllib.request.Request(
-        url,
-        data=data,
-        method="POST"
+    token = os.environ.get(
+        "GITHUB_TOKEN"
     )
 
-    try:
-        with urllib.request.urlopen(
-            request,
-            timeout=20
-        ) as response:
-
-            result = response.read().decode("utf-8")
-
-            print("Telegram API response:")
-            print(result)
-
-            return True
-
-    except urllib.error.HTTPError as error:
-
-        response = error.read().decode("utf-8")
-
-        print("TELEGRAM ERROR:")
-        print(response)
-
-        return False
-
-    except Exception as error:
-
-        print(f"Telegram connection error: {error}")
-
-        return False
-
-    import urllib.request
-    import urllib.parse
-
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{token}/sendMessage"
+    repository = os.environ.get(
+        "GITHUB_REPOSITORY"
     )
 
-    data = urllib.parse.urlencode({
-        "chat_id": chat_id,
-        "text": message,
-        "disable_web_page_preview": False
+    if not token or not repository:
+        print(
+            "GitHub token/repository not available."
+        )
+        return
+
+    dates = "\n".join(
+        f"- **{x['arrival']} → {x['departure']}**"
+        for x in available
+    )
+
+    body = f"""
+# 🚨 Robberg Fountain Shack available
+
+The monitor found availability for:
+
+{dates}
+
+### Book immediately
+
+{BOOKING_URL}
+
+This alert was generated automatically by the Robberg availability monitor.
+"""
+
+    data = json.dumps({
+        "title": "🚨 Robberg Fountain Shack available!",
+        "body": body,
+        "labels": ["availability"]
     }).encode()
 
     request = urllib.request.Request(
-        url,
+        f"https://api.github.com/repos/{repository}/issues",
         data=data,
-        method="POST"
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28"
+        }
     )
 
     try:
@@ -397,20 +307,18 @@ async def send_telegram(message):
         ) as response:
 
             print(
-                "Telegram response:",
+                "GitHub notification created:"
+            )
+
+            print(
                 response.read().decode()
             )
 
-            return response.status == 200
-
-    except Exception as e:
+    except Exception as error:
 
         print(
-            f"Telegram notification failed: {e}",
-            file=sys.stderr
+            f"GitHub notification failed: {error}"
         )
-
-        return False
 
 
 async def main():
@@ -437,15 +345,20 @@ async def main():
 
             try:
 
-                available, details = await check_pair(
+                available = await check_pair(
                     page,
                     arrival,
                     departure
                 )
 
+                status = (
+                    "AVAILABLE"
+                    if available
+                    else "NO AVAILABILITY"
+                )
+
                 print(
-                    f"{arrival} -> {departure}: "
-                    f"{'AVAILABLE' if available else 'NO AVAILABILITY'}"
+                    f"{arrival} -> {departure}: {status}"
                 )
 
                 if available:
@@ -458,13 +371,12 @@ async def main():
             except Exception as error:
 
                 print(
-                    f"{arrival} -> {departure}: ERROR: {error}",
-                    file=sys.stderr
+                    f"{arrival} -> {departure}: ERROR: {error}"
                 )
 
         await browser.close()
 
-    old_dates = {
+    old = {
         item["arrival"]
         for item in state.get(
             "available",
@@ -475,43 +387,22 @@ async def main():
     new = [
         item
         for item in found
-        if item["arrival"] not in old_dates
+        if item["arrival"] not in old
     ]
 
     state["available"] = found
 
-    state["last_checked"] = (
-        date.today().isoformat()
-    )
+    state["last_checked"] = date.today().isoformat()
 
     save_state(state)
 
-    # Send Telegram notification for new availability.
     if new:
 
-        lines = [
-            "🚨 ROBBERG FOUNTAIN SHACK AVAILABLE!",
-            "",
-        ]
+        print(
+            "NEW AVAILABILITY FOUND!"
+        )
 
-        for item in new:
-
-            lines.append(
-                f"• {item['arrival']} → "
-                f"{item['departure']}"
-            )
-
-        lines.extend([
-            "",
-            "Book immediately:",
-            BOOKING_URL
-        ])
-
-        message = "\n".join(lines)
-
-        print(message)
-
-        await send_telegram(message)
+        create_github_issue(new)
 
     else:
 
@@ -531,4 +422,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(send_telegram("🧪 Robberg monitor test — Telegram is working!"))
+    asyncio.run(main())
